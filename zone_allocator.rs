@@ -19,7 +19,7 @@ use super::OnBoot;
 use vstd::cell;
 use vstd::cell::*;
 use vstd::prelude::*;
-use vstd::math::*;
+use vstd::math::{min, max};
 
 #[cfg(feature = "trace_zone")]
 mod tracer {
@@ -96,11 +96,162 @@ mod tracer {
 
 verus! {
 
-// TODO: Check whether this constant makes sense
-pub const MAX_DESCRIPTOR_COUNT: usize = 123123123;
-// TODO: Check this (maybe 0xffff_8000_0000_0000?)
-pub const MAX_ADDR: usize = 0x1_0000;
-pub const MAX_ORDER_SIZE: usize = 8388608; // 1 << 22
+global layout usize is size == 8;
+
+// 128GiB
+pub const MAX_DESCRIPTOR_COUNT: usize = 0x8000000;
+pub const MAX_ADDR: usize = 0xffffff0000000000 + 0x8000000000;
+// Order11.
+pub const MAX_ORDER_SIZE: usize = 0x800000;
+
+pub proof fn lshift_non_zero(x: usize)
+    requires
+        x < 64,
+    ensures
+        (1usize << x) != 0,
+{
+    assert(x < 64usize ==> ((1usize << x) as usize) != 0usize) by(bit_vector);
+}
+
+pub proof fn lshift_le(x: usize, y: usize)
+    requires
+        x <= y,
+        y < 64,
+    ensures
+        1usize << x <= 1usize << y,
+{
+    assert(x <= y && y < 64usize ==> 1usize << x <= 1usize << y) by(bit_vector);
+}
+
+pub proof fn lshift_mult(x: usize, y: usize)
+    requires
+        y <= x,
+        x < 32,
+    ensures
+        (1usize << ((x - y) as usize)) * (1usize << y) == 1usize << x,
+{
+    let z = (x - y) as usize;
+    assert(y <= x && x < 32usize && z == sub(x, y) ==> mul((1usize << z), (1usize << y)) == (1usize << x)) by(bit_vector);
+    assert(y <= x && x < 32usize && z == sub(x, y) ==> (1usize << z) <= (1usize << 31usize)) by(bit_vector);
+    assert(y <= x && x < 32usize ==> (1usize << y) <= (1usize << 31usize)) by(bit_vector);
+    assert((1usize << 31usize) * (1usize << 31usize) <= usize::MAX) by(compute_only);
+    assert((1usize << z) <= (1usize << 31usize) && (1usize << y) <= (1usize << 31usize) && (1usize << 31usize) * (1usize << 31usize) <= usize::MAX
+        ==> (1usize << z) * (1usize << y) <= usize::MAX) by(nonlinear_arith);
+    assert(mul((1usize << z), (1usize << y)) == (1usize << z) * (1usize << y));
+}
+
+pub proof fn add_when_and_is_zero(x: u128, y: u128)
+    requires
+        x <= ((1u128 << 64u128) - 1u128),
+        y <= ((1u128 << 64u128) - 1u128),
+        x & y == 0,
+    ensures
+        x + y <= ((1u128 << 64u128) - 1u128),
+{
+    let ub: u128 = ((1u128 << 64u128) - 1u128) as u128;
+    assert(x & y == 0 ==> add(x, y) == x | y) by(bit_vector);
+    assert(x <= ub && y <= ub && ub == sub(1u128 << 64u128, 1u128) ==> x | y <= ub) by(bit_vector);
+    assert(((1u128 << 64u128) - 1u128) + ((1u128 << 64u128) - 1u128) <= u128::MAX) by(compute_only);
+    assert(x + y <= u128::MAX);
+    assert(add(x, y) == x + y);
+    assert(x + y == x | y);
+    assert(x + y <= ub);
+}
+
+pub proof fn rshift_le(x: usize, y: usize, z: usize)
+    requires
+        x <= y,
+    ensures
+        x >> z <= y >> z,
+{
+    assert(x <= y ==> x >> z <= y >> z) by(bit_vector);
+}
+
+pub proof fn and_preserved_in_u128(x: usize, y: usize)
+    ensures
+        (x as u128) & (y as u128) == x & y,
+{
+    assert((x as u128) & (y as u128) == ((x & y) as u128)) by(bit_vector);
+}
+
+pub proof fn left_right_shift(x: usize, y: usize)
+    requires
+        y < 64,
+        x & !(((1usize << ((64usize - y) as usize)) - 1usize) as usize) == 0,
+    ensures
+        ((x << y) >> y) == x,
+{
+    let mask = ((1usize << ((64usize - y) as usize)) - 1usize) as usize;
+    assert(y < 64usize && mask == sub(1usize << sub(64usize, y), 1usize) && x & !mask == 0usize ==> ((x << y) >> y) == x) by(bit_vector);
+    assert(((x << y) >> y) == x);
+}
+
+pub proof fn rshift_add(x: usize, y: usize, z: usize)
+    requires
+        x + y <= usize::MAX,
+    ensures
+        (x >> z) + (y >> z) <= ((x + y) as usize) >> z,
+    decreases ((x + y) as usize),
+{
+    if 64 <= z {
+        assert(64usize <= z ==> x >> z == 0usize) by(bit_vector);
+        assert(64usize <= z ==> y >> z == 0usize) by(bit_vector);
+        assert(64usize <= z ==> add(x, y) >> z == 0usize) by(bit_vector);
+        assert((x >> z) + (y >> z) <= ((x + y) as usize) >> z);
+    } else {
+        let mask = ((1usize << z) - 1usize) as usize;
+        assert(z < 64usize && mask == sub((1usize << z), 1usize) ==> x == add(x & !mask, x & mask)) by(bit_vector);
+        assert(z < 64usize && mask == sub((1usize << z), 1usize) ==> y == add(y & !mask, y & mask)) by(bit_vector);
+        assert(z < 64usize && mask == sub((1usize << z), 1usize) ==> add(x & !mask, x & mask) >> z == (x & !mask) >> z) by(bit_vector);
+        assert(z < 64usize && mask == sub((1usize << z), 1usize) ==> add(y & !mask, y & mask) >> z == (y & !mask) >> z) by(bit_vector);
+        assert(usize::MAX <= ((1u128 << 64u128) - 1u128)) by(compute_only);
+        assert(usize::MAX >= ((1u128 << 64u128) - 1u128)) by(compute_only);
+        assert(x & !mask <= x) by(bit_vector);
+        assert(x & mask <= x) by(bit_vector);
+        assert(y & !mask <= y) by(bit_vector);
+        assert(y & mask <= y) by(bit_vector);
+
+        assert((x & !mask) & (x & mask) == 0usize) by(bit_vector);
+        and_preserved_in_u128(x & !mask, x & mask);
+        add_when_and_is_zero((x & !mask) as u128, (x & mask) as u128);
+        assert((x & !mask) + (x & mask) <= usize::MAX);
+        assert(x == (x & !mask) + (x & mask));
+
+        assert((y & !mask) & (y & mask) == 0usize) by(bit_vector);
+        and_preserved_in_u128(y & !mask, y & mask);
+        add_when_and_is_zero((y & !mask) as u128, (y & mask) as u128);
+        assert((y & !mask) + (y & mask) <= usize::MAX);
+        assert(y == (y & !mask) + (y & mask));
+
+        if x & mask == 0 && y & mask == 0 {
+            assert((x >> z) == ((x & !mask) >> z));
+            assert((y >> z) == ((y & !mask) >> z));
+            assert((((x + y) as usize) >> z) == ((((x & !mask) + (y & !mask)) as usize) >> z));
+            assert(mask == sub((1usize << z), 1usize) ==> ((x & !mask) >> z) << z == x & !mask) by(bit_vector);
+            assert(mask == sub((1usize << z), 1usize) ==> ((y & !mask) >> z) << z == y & !mask) by(bit_vector);
+            assert((((x & !mask) + (y & !mask)) as usize) == (((((x & !mask) >> z) << z) + (((y & !mask) >> z) << z)) as usize));
+            assert((((x + y) as usize) >> z) == (((((x & !mask) >> z) << z) + (((y & !mask) >> z) << z)) as usize) >> z);
+            assert(mask == sub((1usize << z), 1usize) ==> add(((x & !mask) >> z) << z, ((y & !mask) >> z) << z) == add((x & !mask) >> z, (y & !mask) >> z) << z) by(bit_vector);
+            assert(((((x & !mask) >> z) + ((y & !mask) >> z)) as usize) & !(((1usize << ((64 - z) as usize)) - 1) as usize) == 0) by {
+                assert(mask == sub(1usize << z, 1usize) && z < 64usize && add(x as u128, y as u128) <= sub(1u128 << 64u128, 1u128) ==>
+                    add((x & !mask) >> z, (y & !mask) >> z) & !(sub(1usize << sub(64usize, z), 1usize)) == 0usize) by(bit_vector);
+            }
+            left_right_shift((((x & !mask) >> z) + ((y & !mask) >> z)) as usize, z);
+            assert((x >> z) + (y >> z) == ((x >> z) + (y >> z)) as usize) by {
+                assert(x >> z <= x) by(bit_vector);
+                assert(y >> z <= y) by(bit_vector);
+            }
+            assert((x >> z) + (y >> z) <= ((x + y) as usize) >> z);
+        } else {
+            assert((((x & !mask) + (y & !mask)) as usize) < ((x + y) as usize));
+            rshift_add(x & !mask, y & !mask, z);
+            assert((x >> z) == ((x & !mask) >> z));
+            assert((y >> z) == ((y & !mask) >> z));
+            rshift_le(((x & !mask) + (y & !mask)) as usize, (x + y) as usize, z);
+            assert((x >> z) + (y >> z) <= ((x + y) as usize) >> z);
+        }
+    }
+}
 
 pub open spec fn round_up_to_page(x: usize) -> usize {
     ((((x as usize) + (PAGE_MASK as usize)) as usize) & (!PAGE_MASK as usize) as usize)
@@ -355,13 +506,13 @@ impl PointsToNodes {
             self.wf(&descs[i as int]),
             descs_len_wf(descs, descs_len),
             self.log_size() != 0,
-            i + ((1 as usize) << ((self.log_size() - 1) as usize)) < descs_len,
+            i + (1usize << ((self.log_size() - 1) as usize)) < descs_len,
         ensures
             res.0.log_size() == self.log_size() - 1,
             res.1.log_size() == self.log_size() - 1,
             res.0.wf(&descs[i as int]),
             res.0@ == self@,
-            res.1.wf(&descs[i as int + ((1 as usize) << ((self.log_size() - 1) as usize))]),
+            res.1.wf(&descs[i as int + (1usize << ((self.log_size() - 1) as usize))]),
             res.1@.is_some(),
     {
         unimplemented!()
@@ -379,11 +530,11 @@ impl PointsToNodes {
             self.wf(&descs[i as int]),
             descs_len_wf(descs, descs_len),
             new_log_size <= self.log_size(),
-            i + ((1 as usize) << (self.log_size() as usize)) < descs_len,
+            i + (1usize << (self.log_size() as usize)) < descs_len,
         ensures
-            res.len() == (1 as usize) << ((self.log_size() - new_log_size) as usize),
+            res.len() == 1usize << ((self.log_size() - new_log_size) as usize),
             forall|j: nat| j < res.len() ==> res[j as int].log_size() == new_log_size,
-            forall|j: nat| j < res.len() ==> res[j as int].wf(&descs[i + (((1 as usize) << (new_log_size as usize)) as usize) * j]),
+            forall|j: nat| j < res.len() ==> res[j as int].wf(&descs[i + ((1usize << (new_log_size as usize)) as usize) * j]),
             res[0]@ == self@,
             forall|j: nat| 1 <= j && j < res.len() ==> res[j as int]@.is_some(),
     {
@@ -401,8 +552,8 @@ impl PointsToNodes {
         requires
             self.wf(&descs[i as int]),
             descs_len_wf(descs, descs_len),
-            i + ((1 as usize) << (self.log_size() as usize)) < descs_len,
-            target.wf(&descs[i as int + ((1 as usize) << (self.log_size() as usize))]),
+            i + (1usize << (self.log_size() as usize)) < descs_len,
+            target.wf(&descs[i as int + (1usize << (self.log_size() as usize))]),
             self.log_size() == target.log_size(),
             target@.is_some(),
         ensures
@@ -464,7 +615,7 @@ fn per_cpu_cache_do_get(
                 &&& v.1@.wf(v.0)
                 &&& v.1@.log_size() as int == order.into_int()
                 &&& v.1@@.is_some()
-                &&& exists|i: nat| allocator.descs.descs[i as int] == *v.0 && i + ((1 as usize) << (v.1@.log_size() as usize)) < allocator.descs.descs_len@
+                &&& exists|i: nat| allocator.descs.descs[i as int] == *v.0 && i + (1usize << (v.1@.log_size() as usize)) < allocator.descs.descs_len@
             }
             None => true,
         }
@@ -498,7 +649,7 @@ fn per_cpu_cache_do_put(
         pointsto.wf(page),
         pointsto@.is_some(),
         pointsto.log_size() as int == order.into_int(),
-        exists|i: nat| allocator.descs.descs[i as int] == *page && i + ((1 as usize) << (pointsto.log_size() as usize)) < allocator.descs.descs_len@,
+        exists|i: nat| allocator.descs.descs[i as int] == *page && i + (1usize << (pointsto.log_size() as usize)) < allocator.descs.descs_len@,
     ensures
         match ret {
             Some(v) => {
@@ -1179,7 +1330,7 @@ impl<'a> PageDescriptorIndex<'a> {
             self.is_addr(addr),
             next.is_addr(addr + order.size_spec()),
         ensures
-            next.index == self.index + ((1 as usize) << (order.into_int() as usize)),
+            next.index == self.index + (1usize << (order.into_int() as usize)),
     {
     }
 
@@ -1298,7 +1449,7 @@ impl FreeArea {
         &&& exists|i_descs: nat|
                 #[trigger]
                 descs[i_descs as int] == self.ghost_state@.ptrs[i as int] &&
-                i_descs + ((1 as usize) << (self.ghost_state@.points_to_map[i].log_size() as usize)) < descs_len
+                i_descs + (1usize << (self.ghost_state@.points_to_map[i].log_size() as usize)) < descs_len
         &&& match self.ghost_state@.points_to_map[i]@ {
                 Some(n) => self.is_prev_wf(i, n) && self.is_next_wf(i, n),
                 None => false,
@@ -1350,7 +1501,7 @@ impl FreeArea {
             ret@.wf(&guard.original),
             ret@.log_size() as int == self.ghost_state@.order.into_int(),
             ret@@.is_some(),
-            exists|i: nat| descs[i as int] == guard.original && i + ((1 as usize) << (ret@.log_size() as usize)) < descs_len
+            exists|i: nat| descs[i as int] == guard.original && i + (1usize << (ret@.log_size() as usize)) < descs_len
     {
         let ghost i_witness = choose|i: nat| 0 <= i && i < self.ghost_state@.ptrs.len() && self.ghost_state@.ptrs[i as int] == &guard.original;
         assert(self.is_node_wf(descs, descs_len, i_witness));
@@ -1447,7 +1598,7 @@ impl FreeArea {
             page.wf(),
             pts.log_size() as int == old(self).ghost_state@.order.into_int(),
             pts@.is_some(),
-            exists|i: nat| descs[i as int] == *page && i + ((1 as usize) << (pts.log_size() as usize)) < descs_len
+            exists|i: nat| descs[i as int] == *page && i + (1usize << (pts.log_size() as usize)) < descs_len
         ensures
             self.wf(descs, descs_len),
             self.ghost_state@.order == old(self).ghost_state@.order,
@@ -1515,7 +1666,7 @@ impl FreeArea {
                     &&& pts@.wf(desc)
                     &&& pts@.log_size() as int == self.ghost_state@.order.into_int()
                     &&& pts@@.is_some()
-                    &&& exists|i: nat| descs[i as int] == *desc && i + ((1 as usize) << (pts@.log_size() as usize)) < descs_len
+                    &&& exists|i: nat| descs[i as int] == *desc && i + (1usize << (pts@.log_size() as usize)) < descs_len
                 }
                 None => self.ghost_state@.ptrs.len() == old(self).ghost_state@.ptrs.len() && self.ghost_state@.ptrs.len() == 0,
             }
@@ -1555,7 +1706,7 @@ impl Cache {
                     &&& v.1@.wf(v.0)
                     &&& v.1@.log_size() as int == self.order.into_int()
                     &&& v.1@@.is_some()
-                    &&& exists|i: nat| allocator.descs.descs[i as int] == *v.0 && i + ((1 as usize) << (v.1@.log_size() as usize)) < allocator.descs.descs_len@
+                    &&& exists|i: nat| allocator.descs.descs[i as int] == *v.0 && i + (1usize << (v.1@.log_size() as usize)) < allocator.descs.descs_len@
                 }
                 None => true,
             }
@@ -1564,7 +1715,7 @@ impl Cache {
             if let Some((page, pointsto)) = unsafe { allocator.get_page_buddy(Order::Order8) } {
                 let ghost page_idx = choose|i: nat|
                         allocator.descs.descs[i as int] == *page &&
-                        i + ((1 as usize) << (pointsto@.log_size() as usize)) < allocator.descs.descs_len@;
+                        i + (1usize << (pointsto@.log_size() as usize)) < allocator.descs.descs_len@;
                 let mut guard = unsafe { page.get() };
 
                 assume(match guard.lock_acc@@.value {
@@ -1576,19 +1727,20 @@ impl Cache {
                 });
                 guard.set_common_info_head_order(self.order);
                 let Tracked(pointsto) = pointsto;
+                let ghost pointsto_old_log_size = pointsto.log_size();
                 let step = 1 << self.order.into_usize();
                 let pfn = allocator.descs.indexed_ref(page, Ghost(page_idx)).unwrap().frame_index();
 
                 assert(pfn as nat == page_idx);
                 assert(pointsto.wf(&allocator.descs.descs[pfn as int]));
                 assert(self.order.into_int() <= pointsto.log_size());
-                assert(pfn as nat + ((1 as usize) << (pointsto.log_size() as usize)) < allocator.descs.descs_len@);
+                assert(pfn as nat + (1usize << (pointsto.log_size() as usize)) < allocator.descs.descs_len@);
                 let tracked mut pointsto_seq = pointsto.resize(&allocator.descs.descs, allocator.descs.descs_len@, pfn as nat, self.order.into_int() as nat);
-                assert(pointsto_seq.len() == ((1 as usize) << ((pointsto.log_size() - self.order.into_int()) as usize)));
+                assert(pointsto_seq.len() == (1usize << ((pointsto.log_size() - self.order.into_int()) as usize)));
+
                 let tracked pointsto;
                 proof {
-                    // FIXME: Verus does not support reasoning about `<<` for usize
-                    assume(pointsto_seq.len() != 0);
+                    lshift_non_zero((pointsto_old_log_size - self.order.into_int()) as usize);
                     let tracked x = seq_split_front(pointsto_seq);
                     pointsto = x.0;
                     pointsto_seq = x.1;
@@ -1596,20 +1748,30 @@ impl Cache {
 
                 guard.drop();
 
-                // FIXME: Verus does not support reasoning about `<<` for usize
-                assume(page_idx + ((1 as usize) << (pointsto.log_size() as usize)) < allocator.descs.descs_len@);
+                assert(page_idx + (1usize << (pointsto.log_size() as usize)) < allocator.descs.descs_len@) by {
+                    lshift_le(pointsto.log_size() as usize, pointsto_old_log_size as usize);
+                }
                 unsafe { self.fa.push(Tracked(allocator.descs.descs), Ghost(allocator.descs.descs_len@), page, Tracked(pointsto), false) }
 
-                let mut iter_idx: usize = 1 << (Order::Order8.into_usize() - self.order.into_usize()) - 1;
-                // FIXME: Verus does not support reasoning about `<<` for usize
-                assume(1 <= step && step <= 8);
-                assume(pointsto_seq.len() == iter_idx as nat);
+                let mut iter_idx: usize = (1 << (Order::Order8.into_usize() - self.order.into_usize())) - 1;
                 let mut pfn_iter = pfn + step;
 
                 // Prepare loop invariant
+                assert(1 <= step && step <= 8) by {
+                    let sz = self.order.into_int() as usize;
+                    assert(sz <= 3usize ==> 1usize <= (1usize << sz) && (1usize << sz) <= 8usize) by(bit_vector);
+                }
+                assert(pointsto_seq.len() == iter_idx as nat);
                 assert forall|j: nat| j < pointsto_seq.len() implies pointsto_seq[j as int].wf(&allocator.descs.descs[pfn_iter + step * j]) by {
                     assert(pointsto_seq[j as int].wf(&allocator.descs.descs[pfn + step * (j + 1)]));
                     assert(step * (j + 1) == step * j + step) by(nonlinear_arith);
+                }
+                assert(pfn_iter + iter_idx * step < allocator.descs.descs_len@) by {
+                    let calc1 = 1usize << ((Order::Order8.into_int() - self.order.into_int()) as usize);
+                    assert(1 <= calc1 ==> (calc1 - 1) * step == calc1 * step - step) by(nonlinear_arith);
+                    assert(iter_idx * step == calc1 * step - step);
+                    lshift_mult(Order::Order8.into_int() as usize, self.order.into_int() as usize);
+                    assert(((calc1 * step) as usize) == (1usize << 8usize));
                 }
 
                 // Verus does not allow using the `step_by`
@@ -1622,13 +1784,16 @@ impl Cache {
                         self.fa.wf(&allocator.descs.descs, allocator.descs.descs_len@),
                         pointsto_seq.len() == iter_idx as nat,
                         0 <= iter_idx,
-                        pointsto_seq.len() + self.fa.ghost_state@.ptrs.len() == ((1 as usize) << ((Order::Order8.into_int() - self.order.into_int()) as usize)),
+                        pointsto_seq.len() + self.fa.ghost_state@.ptrs.len() == (1usize << ((Order::Order8.into_int() - self.order.into_int()) as usize)),
                         forall|j: nat| j < pointsto_seq.len() ==> pointsto_seq[j as int].log_size() == self.order.into_int() as nat,
                         forall|j: nat| j < pointsto_seq.len() ==> pointsto_seq[j as int].wf(&allocator.descs.descs[pfn_iter + step * j]),
                         forall|j: nat| j < pointsto_seq.len() ==> pointsto_seq[j as int]@.is_some(),
+                        pfn_iter + iter_idx * step < allocator.descs.descs_len@,
+                        step == (1usize << (self.order.into_int() as usize)),
                 {
-                    // FIXME: Verus does not support reasoning about `<<` for usize
-                    assume(0 <= pfn_iter && pfn_iter < allocator.descs.descs_len@ - step);
+                    assert(pfn_iter < allocator.descs.descs_len@ - step) by {
+                        assert(1 <= iter_idx ==> pfn_iter + step <= pfn_iter + iter_idx * step) by(nonlinear_arith);
+                    }
                     let new_leader = allocator.descs.try_from_index(pfn_iter).unwrap().inner();
                     let tracked mut pointsto;
                     {
@@ -1676,17 +1841,15 @@ impl Cache {
                     }
 
                     assert(allocator.descs.descs[pfn_iter as int] == new_leader);
-                    assert(pfn_iter + ((1 as usize) << (pointsto.log_size() as usize)) < allocator.descs.descs_len@) by {
-                        assert(pointsto.log_size() == self.order.into_int() as nat);
-                        // FIXME: Verus does not support reasoning about `<<` for usize
-                        assume(((1 as usize) << (pointsto.log_size() as usize)) == step);
-                    }
                     unsafe { self.fa.push(Tracked(allocator.descs.descs), Ghost(allocator.descs.descs_len@), new_leader, Tracked(pointsto), false) }
 
                     // Loop invariant for the next iteration
                     assert forall|j: nat| j < pointsto_seq.len() implies pointsto_seq[j as int].wf(&allocator.descs.descs[(pfn_iter + step) + step * j]) by {
                         assert(pointsto_seq[j as int].wf(&allocator.descs.descs[pfn_iter + step * (j + 1)]));
                         assert(step * (j + 1) == step * j + step) by(nonlinear_arith);
+                    }
+                    assert((pfn_iter + step) + (iter_idx - 1) * step < allocator.descs.descs_len@) by {
+                        assert((iter_idx - 1) * step == iter_idx * step - step) by(nonlinear_arith);
                     }
 
                     pfn_iter = pfn_iter + step;
@@ -1717,7 +1880,7 @@ impl Cache {
             pointsto.wf(page),
             pointsto@.is_some(),
             pointsto.log_size() as int == old(self).order.into_int(),
-            exists|i: nat| allocator.descs.descs[i as int] == *page && i + ((1 as usize) << (pointsto.log_size() as usize)) < allocator.descs.descs_len@,
+            exists|i: nat| allocator.descs.descs[i as int] == *page && i + (1usize << (pointsto.log_size() as usize)) < allocator.descs.descs_len@,
         ensures
             self.wf(allocator.descs.descs, allocator.descs.descs_len@),
             self.order == old(self).order,
@@ -1856,7 +2019,7 @@ impl ZoneAllocator {
             pg.wf(),
             pts@.wf(pg),
             pts@@.is_some(),
-            exists|i: nat| self.descs.descs[i as int] == *pg && i + ((1 as usize) << (pts@.log_size() as usize)) < self.descs.descs_len@,
+            exists|i: nat| self.descs.descs[i as int] == *pg && i + (1usize << (pts@.log_size() as usize)) < self.descs.descs_len@,
         ensures
             match ret {
                 Ok(_) => true,
@@ -1891,7 +2054,7 @@ impl ZoneAllocator {
                     &&& pg.wf()
                     &&& pts@.wf(pg)
                     &&& pts@@.is_some()
-                    &&& exists|i: nat| self.descs.descs[i as int] == *pg && i + ((1 as usize) << (pts@.log_size() as usize)) < self.descs.descs_len@
+                    &&& exists|i: nat| self.descs.descs[i as int] == *pg && i + (1usize << (pts@.log_size() as usize)) < self.descs.descs_len@
                 }
                 None => true,
             }
@@ -1967,18 +2130,26 @@ impl ZoneAllocator {
                     &&& exists|i: nat|
                             #[trigger]
                             self.descs.descs[i as int] == *v.0 && 
-                            self.descs.descs[i as int + ((1 as usize) << (req_order.into_int() as usize))] == *v.2 &&
-                            i + ((1 as usize) << (req_order.into_int() as usize)) + ((1 as usize) << (req_order.into_int() as usize)) < self.descs.descs_len@
+                            self.descs.descs[i as int + (1usize << (req_order.into_int() as usize))] == *v.2 &&
+                            i + (1usize << (req_order.into_int() as usize)) + (1usize << (req_order.into_int() as usize)) < self.descs.descs_len@
                 }
                 None => true,
             }
     {
         let norder = req_order.get_next_order()?;
         let (page, Tracked(pointsto)) = self.get_page_with_pin(norder)?;
-        let ghost page_idx = choose|i: nat| self.descs.descs[i as int] == page && i + ((1 as usize) << (norder.into_int() as usize)) < self.descs.descs_len@;
+        let ghost page_idx = choose|i: nat| self.descs.descs[i as int] == page && i + (1usize << (norder.into_int() as usize)) < self.descs.descs_len@;
         assert(0 <= page_idx && page_idx < self.descs.descs_len@);
-        // FIXME: Verus does not support reasoning about `<<` for usize
-        assume(((1 as usize) << (norder.into_int() as usize)) == ((1 as usize) << (req_order.into_int() as usize)) + ((1 as usize) << (req_order.into_int() as usize)));
+        assert((1usize << (norder.into_int() as usize)) == (1usize << (req_order.into_int() as usize)) + (1usize << (req_order.into_int() as usize))) by {
+            let nsz = norder.into_int() as usize;
+            let rsz = req_order.into_int() as usize;
+            assert(nsz == rsz + 1);
+            assert(nsz == add(rsz, 1usize) && rsz <= 11usize ==> (1usize << nsz) == add((1usize << rsz), (1usize << rsz))) by(bit_vector);
+            lshift_le(rsz, 11usize);
+            assert((1usize << 11usize) + (1usize << 11usize) == (1usize << 12usize)) by(compute_only);
+            assert((1usize << rsz) + (1usize << rsz) <= (1usize << 12usize));
+            assert((1usize << rsz) + (1usize << rsz) == add((1usize << rsz), (1usize << rsz)));
+        }
 
         // Change the leader's order.
         let mut guard = page.get();
@@ -1999,11 +2170,10 @@ impl ZoneAllocator {
             let add_val = 1 << shift_amount;
             assert(0 <= fidx && fidx < MAX_DESCRIPTOR_COUNT);
             assert(0 <= shift_amount && shift_amount <= 11);
-            // FIXME: Verus does not support reasoning about `<<` for `usize`
-            assume(0 <= add_val && add_val <= 10000);
+            assert(shift_amount <= 11usize && add_val == (1usize << shift_amount) ==> add_val <= 10000usize) by(bit_vector);
             fidx + add_val
         };
-        assert(next_leader_pfn == page_idx + ((1 as usize) << (req_order.into_int() as usize)));
+        assert(next_leader_pfn == page_idx + (1usize << (req_order.into_int() as usize)));
         assert(next_leader_pfn < self.descs.descs_len@);
         let new_leader = self.descs.try_from_index(next_leader_pfn).unwrap().inner();
 
@@ -2012,7 +2182,7 @@ impl ZoneAllocator {
         assert(pointsto.log_size() != 0) by {
             assert(req_order != Order::Order11);
         }
-        assert(page_idx + ((1 as usize) << ((pointsto.log_size() - 1) as usize)) < self.descs.descs_len@);
+        assert(page_idx + (1usize << ((pointsto.log_size() - 1) as usize)) < self.descs.descs_len@);
         let tracked mut pointsto = pointsto.split(self.descs.descs, self.descs.descs_len@, page_idx);
         let tracked mut pts_l;
         let tracked mut pts_r;
@@ -2043,13 +2213,13 @@ impl ZoneAllocator {
         }
         guard.drop();
 
-        #[verifier::no_auto_loop_invariant]
-        for idx in 1..(1 << req_order.into_usize())
+        let mut idx: usize = 1;
+        let bound: usize = 1 << req_order.into_usize();
+        while idx < bound
             invariant
-                self.wf()
+                self.wf(),
+                next_leader_pfn + bound < self.descs.descs_len@,
         {
-            // FIXME: Verus does not support reasoning about `<<` with usize type
-            assume(next_leader_pfn + idx < self.descs.descs_len@);
             let mut guard = self
                 .descs
                 .try_from_index(next_leader_pfn + idx)
@@ -2076,7 +2246,7 @@ impl ZoneAllocator {
                     &&& v.1@.wf(v.0)
                     &&& v.1@.log_size() == order.into_int()
                     &&& v.1@@.is_some()
-                    &&& exists|i: nat| self.descs.descs[i as int] == *v.0 && i + ((1 as usize) << (v.1@.log_size() as usize)) < self.descs.descs_len@
+                    &&& exists|i: nat| self.descs.descs[i as int] == *v.0 && i + (1usize << (v.1@.log_size() as usize)) < self.descs.descs_len@
                 }
                 None => true,
             }
@@ -2123,14 +2293,14 @@ impl ZoneAllocator {
             pg_pts@.wf(&self.descs.descs[pg.index as int]),
             pg_pts@.log_size() as int == order.into_int(),
             pg_pts@@.is_some(),
-            pg.index as nat + ((1 as usize) << (order.into_int() as usize)) < self.descs.descs_len@,
+            pg.index as nat + (1usize << (order.into_int() as usize)) < self.descs.descs_len@,
         ensures
             ret.0.wf(),
             self.descs == ret.0.descs,
             ret.1@.wf(&self.descs.descs[ret.0.index as int]),
             ret.1@.log_size() as int == ret.2.into_int(),
             ret.1@@.is_some(),
-            ret.0.index as nat + ((1 as usize) << (ret.2.into_int() as usize)) < self.descs.descs_len@,
+            ret.0.index as nat + (1usize << (ret.2.into_int() as usize)) < self.descs.descs_len@,
 // ensures
     // pd.wf(),
     // ret.0.order == ret.1,
@@ -2156,7 +2326,7 @@ impl ZoneAllocator {
                 pg_pts@.wf(&self.descs.descs[pg.index as int]),
                 pg_pts@.log_size() as int == order.into_int(),
                 pg_pts@@.is_some(),
-                pg.index as nat + ((1 as usize) << (order.into_int() as usize)) < self.descs.descs_len@,
+                pg.index as nat + (1usize << (order.into_int() as usize)) < self.descs.descs_len@,
                 pg.is_addr(addr as int),
                 0 <= addr && addr < MAX_ADDR,
                 descr_addr_aligned(addr as int),
@@ -2198,10 +2368,10 @@ impl ZoneAllocator {
                                 assert(cand_pts@.log_size() as int == order.into_int());
                                 let ghost cand_idx = choose|i: nat|
                                     self.descs.descs[i as int] == cand_guard.original &&
-                                    i + ((1 as usize) << (cand_pts@.log_size() as usize)) < self.descs.descs_len@;
+                                    i + (1usize << (cand_pts@.log_size() as usize)) < self.descs.descs_len@;
                                 proof {
                                     self.descs.index_unique(cand.index as nat, cand_idx);
-                                    assert(cand.index as nat + ((1 as usize) << (order.into_int() as usize)) < self.descs.descs_len@);
+                                    assert(cand.index as nat + (1usize << (order.into_int() as usize)) < self.descs.descs_len@);
                                 }
 
                                 merge_pair = if direction {
@@ -2251,9 +2421,17 @@ impl ZoneAllocator {
                         leader.addr_diff_by_order(&next, addr as int, order);
                         leader_pts = leader_pts.merge(next_pts, &self.descs.descs, self.descs.descs_len@, leader.index as nat);
                     }
-                    // FIXME: Verus does not support reasoning about `<<` for usize
-                    assume(((1 as usize) << (next_order.into_int() as usize)) == ((1 as usize) << (order.into_int() as usize)) + ((1 as usize) << (order.into_int() as usize)));
-                    assert(leader.index as nat + ((1 as usize) << (next_order.into_int() as usize)) < self.descs.descs_len@);
+                    assert((1usize << (next_order.into_int() as usize)) == (1usize << (order.into_int() as usize)) + (1usize << (order.into_int() as usize))) by {
+                        let nsz = next_order.into_int() as usize;
+                        let rsz = order.into_int() as usize;
+                        assert(nsz == rsz + 1);
+                        assert(nsz == add(rsz, 1usize) && rsz <= 11usize ==> (1usize << nsz) == add((1usize << rsz), (1usize << rsz))) by(bit_vector);
+                        lshift_le(rsz, 11usize);
+                        assert((1usize << 11usize) + (1usize << 11usize) == (1usize << 12usize)) by(compute_only);
+                        assert((1usize << rsz) + (1usize << rsz) <= (1usize << 12usize));
+                        assert((1usize << rsz) + (1usize << rsz) == add((1usize << rsz), (1usize << rsz)));
+                    }
+                    assert(leader.index as nat + (1usize << (next_order.into_int() as usize)) < self.descs.descs_len@);
                 }
 
                 leader_guard.set_common_info_head(Head {
@@ -2312,9 +2490,9 @@ impl ZoneAllocator {
             pts@.wf(pg),
             pts@.log_size() as int == order.into_int(),
             pts@@.is_some(),
-            exists|i: nat| self.descs.descs[i as int] == *pg && i + ((1 as usize) << (pts@.log_size() as usize)) < self.descs.descs_len@,
+            exists|i: nat| self.descs.descs[i as int] == *pg && i + (1usize << (pts@.log_size() as usize)) < self.descs.descs_len@,
     {
-        let ghost pg_idx = choose|i: nat| self.descs.descs[i as int] == *pg && i + ((1 as usize) << (pts@.log_size() as usize)) < self.descs.descs_len@;
+        let ghost pg_idx = choose|i: nat| self.descs.descs[i as int] == *pg && i + (1usize << (pts@.log_size() as usize)) < self.descs.descs_len@;
         let pg = self.descs.indexed_ref(pg, Ghost(pg_idx)).unwrap();
         let (pg, pg_pts, order) = self.merge(order, pg, pts);
 
@@ -2335,7 +2513,7 @@ impl ZoneAllocator {
             pg.wf(),
             pts.wf(pg),
             pts@.is_some(),
-            exists|i: nat| self.descs.descs[i as int] == *pg && i + ((1 as usize) << (pts.log_size() as usize)) < self.descs.descs_len@,
+            exists|i: nat| self.descs.descs[i as int] == *pg && i + (1usize << (pts.log_size() as usize)) < self.descs.descs_len@,
     {
         let tracked mut pts = pts;
         let mut guard = pg.get();
@@ -2400,7 +2578,7 @@ impl ZoneAllocator {
                     &&& v.1@.wf(v.0)
                     &&& v.1@.log_size() == order.into_int() as nat
                     &&& v.1@@.is_some()
-                    &&& exists|i: nat| self.descs.descs[i as int] == v.0 && i + ((1 as usize) << (order.into_int() as usize)) < self.descs.descs_len@
+                    &&& exists|i: nat| self.descs.descs[i as int] == v.0 && i + (1usize << (order.into_int() as usize)) < self.descs.descs_len@
                 }
                 None => true,
             }
@@ -2425,7 +2603,7 @@ impl ZoneAllocator {
                     &&& v.1@.wf(v.0)
                     &&& v.1@.log_size() == order.into_int() as nat
                     &&& v.1@@.is_some()
-                    &&& exists|i: nat| self.descs.descs[i as int] == v.0 && i + ((1 as usize) << (order.into_int() as usize)) < self.descs.descs_len@
+                    &&& exists|i: nat| self.descs.descs[i as int] == v.0 && i + (1usize << (order.into_int() as usize)) < self.descs.descs_len@
                 }
                 None => true,
             }
@@ -2439,7 +2617,7 @@ impl ZoneAllocator {
             pg.wf(),
             pts@.wf(pg),
             pts@@.is_some(),
-            exists|i: nat| self.descs.descs[i as int] == *pg && i + ((1 as usize) << (pts@.log_size() as usize)) < self.descs.descs_len@,
+            exists|i: nat| self.descs.descs[i as int] == *pg && i + (1usize << (pts@.log_size() as usize)) < self.descs.descs_len@,
     {
         let pin = current_get_pin();
 
@@ -2554,7 +2732,7 @@ impl ZoneAllocator {
             pg.wf(),
             pts@.wf(pg),
             pts@@.is_some(),
-            exists|i: nat| self.descs.descs[i as int] == *pg && i + ((1 as usize) << (pts@.log_size() as usize)) < self.descs.descs_len@,
+            exists|i: nat| self.descs.descs[i as int] == *pg && i + (1usize << (pts@.log_size() as usize)) < self.descs.descs_len@,
     {
         let mut guard = pg.get();
         #[cfg(not(feature = "single_coffer"))]
@@ -2686,19 +2864,26 @@ impl ZoneAllocator {
             proof {
                 aligned_min_diff(cur as int, end as int);
             }
-            let corder = min_spec(
-                match Order::fit_size(rem) {
-                    Some(n) if n.size_with_spec() <= rem => n.into_usize(),
-                    Some(n) => n.get_prev_order().unwrap().into_usize(),
-                    None => Order::Order11.into_usize(),
-                },
-                trailing_zeros_spec(cur) - PAGE_SHIFT
-            );
+            let corder = {
+                let order = match Order::fit_size(rem) {
+                    Some(n) if n.size_with_spec() <= rem => n,
+                    Some(n) => n.get_prev_order().unwrap(),
+                    None => Order::Order11,
+                };
+                assert(order.size_spec() <= rem);
+                let corder = min_spec(order.into_usize(), trailing_zeros_spec(cur) - PAGE_SHIFT);
+
+                assert(1usize << ((corder + PAGE_SHIFT) as usize) <= rem) by {
+                    lshift_le((corder + PAGE_SHIFT) as usize, (order.into_int() + PAGE_SHIFT) as usize);
+                }
+
+                corder
+            };
 
             // Make a head page.
-            // FIXME: Verus does not support reasoning about `<<` for usize
-            assume((1 as usize) << ((corder + PAGE_SHIFT) as usize) <= rem);
-            assume(((cur - self.descs.base) as usize) >> PAGE_SHIFT < self.descs.descs_len@);
+            assert(((cur - self.descs.base) as usize) >> PAGE_SHIFT < self.descs.descs_len@) by {
+                rshift_le((cur - self.descs.base) as usize, (end - self.descs.base) as usize, PAGE_SHIFT as usize);
+            }
             let head_page = self
                 .descs
                 .try_from_index((cur - self.descs.base) >> PAGE_SHIFT)
@@ -2733,18 +2918,24 @@ impl ZoneAllocator {
             // Make trailing pages.
             let head = head_page.inner();
             let mut idx: usize = 1;
-            let mut bound: usize = 1 << corder;
+            let bound: usize = 1 << corder;
+
+            assert((((cur - self.descs.base) as usize) >> PAGE_SHIFT) + bound < self.descs.descs_len@) by {
+                let bound_shift: usize = (1usize << ((corder + PAGE_SHIFT) as usize));
+                assert(corder <= 11usize ==> 1usize << corder == (1usize << add(corder, 12usize)) >> 12usize) by(bit_vector);
+                assert(cur - self.descs.base + bound_shift <= end - self.descs.base);
+                rshift_add((cur - self.descs.base) as usize, bound_shift, PAGE_SHIFT);
+                assert((((cur - self.descs.base) as usize) >> PAGE_SHIFT) + (bound_shift >> PAGE_SHIFT) <= ((cur - self.descs.base + bound_shift) as usize >> PAGE_SHIFT));
+                rshift_le((cur - self.descs.base + bound_shift) as usize, (end - self.descs.base) as usize, PAGE_SHIFT);
+            }
+
             while idx < bound
                 invariant
                     self.wf(),
                     self.descs.base <= cur,
-                    (1 as usize) << ((corder + PAGE_SHIFT) as usize) <= rem,
-                    ((end - self.descs.base) as usize) >> PAGE_SHIFT < self.descs.descs_len@,
+                    (((cur - self.descs.base) as usize) >> PAGE_SHIFT) + bound < self.descs.descs_len@,
                     cur < MAX_ADDR,
             {
-                // FIXME: Verus does not support reasoning about `<<` for usize
-                assume((((cur - self.descs.base) as usize) >> PAGE_SHIFT) + idx < self.descs.descs_len@);
-                assume(bound <= 2048);
                 let trail_page = self
                     .descs
                     .try_from_index(((cur - self.descs.base) >> PAGE_SHIFT) + idx)
@@ -2760,14 +2951,12 @@ impl ZoneAllocator {
             assert(self.fa_spec(&self.free_area[corder as int], corder as int));
             let (mut perm, guard) = self.free_area[corder].acquire();
             let mut fa = self.free_area[corder].data.take(Tracked(&mut perm.borrow_mut()));
-            // FIXME: Verus does not support reasoning about `<<` for usize
-            assume(exists|i: nat| self.descs.descs[i as int] == head && i + ((1 as usize) << (pts.log_size() as usize)) < self.descs.descs_len@);
             fa.push(Tracked(&self.descs.descs), Ghost(self.descs.descs_len@), head, Tracked(pts), true);
             self.free_area[corder].data.put(Tracked(&mut perm.borrow_mut()), fa);
             self.free_area[corder].release(perm);
             guard.drop();
 
-            assert(descr_addr_aligned(cur + ((1 as usize) << ((corder + PAGE_SHIFT) as usize)))) by {
+            assert(descr_addr_aligned(cur + (1usize << ((corder + PAGE_SHIFT) as usize)))) by {
                 let order =
                     if corder == 0 {
                         Order::Order0
@@ -2795,7 +2984,7 @@ impl ZoneAllocator {
                         Order::Order11
                     };
                 assert(corder as int == order.into_int());
-                assert(((1 as usize) << ((corder + PAGE_SHIFT) as usize)) == order.size_spec());
+                assert((1usize << ((corder + PAGE_SHIFT) as usize)) == order.size_spec());
                 diff_by_order_size(cur as int, order);
             }
 
